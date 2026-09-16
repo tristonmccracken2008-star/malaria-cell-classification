@@ -7,6 +7,8 @@ from pathlib import Path
 import random
 import shutil
 from types import coroutine
+import matplotlib.pyplot as plt
+import numpy as np
 import torch
 from sklearn.metrics import balanced_accuracy_score, confusion_matrix
 from torch import nn
@@ -33,7 +35,7 @@ model.fc = nn.Linear(
 # load model
 
 model.load_state_dict(
-    torch.load("ENTER PATH HERE")
+    torch.load("bestmodel.pth")
 
 
 )
@@ -61,10 +63,11 @@ class_names = [
 
 ]
 
-image_path = Path("2710_lores.jpg")
+image_path = Path("cell2.jpg")
 
 with Image.open(image_path) as img:
     img = img.convert("RGB")
+    original_image = img.copy()
     image = predicted_transformer(img)
 
 image = image.unsqueeze(0)
@@ -72,6 +75,99 @@ image = image.unsqueeze(0)
 with torch.no_grad():
     output = model(image)
     prediction = torch.argmax(output,dim=1)
+    probabilities = torch.softmax(output, dim=1)
+    confidence = torch.max(probabilities).item()
 
 class_prediction = class_names[prediction]
 print(class_prediction)
+
+# globals
+
+activations = None
+gradients = None
+
+# Functions
+
+def save_activations(module, input, output):
+    global activations
+    activations = output
+
+def save_gradients(module, grad_input, grad_output):
+    global gradients
+    gradients = grad_output[0]
+
+# target
+
+target_layer = model.layer4[-1].conv3
+
+# Hooks
+
+forward_hook = target_layer.register_forward_hook(
+    save_activations
+)
+
+backward_hook = target_layer.register_full_backward_hook(
+    save_gradients
+)
+
+# Model Stuff
+
+model.zero_grad()
+output = model(image)
+class_score = output[0,prediction]
+class_score.backward()
+
+# weights
+
+weights = gradients.mean(
+    dim=(2,3),
+    keepdim=True
+)
+
+weighted_activations = weights * activations
+
+# heatmap
+
+heatmap = weighted_activations.sum(
+    dim=1
+)
+
+heatmap = torch.relu(heatmap)
+heatmap = heatmap.squeeze()
+heatmap = heatmap.detach().cpu().numpy()
+
+# Normalize
+
+heatmap = heatmap - heatmap.min()
+
+if heatmap.max() > 0:
+    heatmap = heatmap / heatmap.max()
+
+# image
+
+heatmap_image = Image.fromarray(
+    np.uint8(heatmap * 255)
+)
+
+heatmap_image = heatmap_image.resize(
+    original_image.size
+)
+
+heatmap = np.array(heatmap_image) / 255
+
+# Show
+
+plt.imshow(
+    original_image
+)
+
+plt.imshow(
+    heatmap,
+    cmap="jet",
+    alpha=0.45
+)
+
+plt.axis("off")
+
+plt.title(f"{class_prediction} : {confidence * 100}")
+plt.show()
